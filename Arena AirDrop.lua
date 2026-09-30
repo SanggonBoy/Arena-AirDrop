@@ -45,6 +45,7 @@ local S={
 	noSpread=false,
 	trig=false, trigDelay=120,
 	espM=false, espB=false,
+	cfgAuto=false, -- auto-load konfigurasi tersimpan saat script jalan/teleport
 }
 local SavedWS, SavedJP = 30, 50 -- WS asli game ini 30 (terverifikasi live)
 local SpeedDirty, JumpDirty = false, false
@@ -206,7 +207,7 @@ local function btn(page,txt,cb)
 	end)
 	return b
 end
-local function slide(page,txt,min,max,def,cb)
+local function slide(page,txt,min,max,def,cb,key)
 	ord=ord+1
 	local f=mk('Frame',{Size=UDim2.new(1,-4,0,48),BackgroundColor3=Color3.fromRGB(24,28,38),BorderSizePixel=0,LayoutOrder=ord},page)
 	cr(f,8)
@@ -231,7 +232,7 @@ local function slide(page,txt,min,max,def,cb)
 		fill.Size=UDim2.new(rel,0,1,0)
 		cb(v)
 	end
-	table.insert(slideRegs,{def=def,set=setVal})
+	table.insert(slideRegs,{key=key,def=def,set=setVal, min=min, max=max})
 	bar.InputBegan:Connect(function(io)
 		if io.UserInputType==Enum.UserInputType.MouseButton1 or io.UserInputType==Enum.UserInputType.Touch then hold=true set(io.Position.X) end
 	end)
@@ -271,8 +272,8 @@ tabBtns['Gerak'].BackgroundColor3=Color3.fromRGB(45,90,160)
 
 -- ================= ISI =================
 sect(pages['Gerak'],'KECEPATAN (tulis hanya saat digeser)')
-slide(pages['Gerak'],'WalkSpeed',16,300,30,function(v) SavedWS=v SpeedDirty=true local c=lp.Character local h=c and c:FindFirstChildOfClass('Humanoid') if h then h.WalkSpeed=v end end)
-slide(pages['Gerak'],'JumpPower',50,300,50,function(v) SavedJP=v JumpDirty=true local c=lp.Character local h=c and c:FindFirstChildOfClass('Humanoid') if h then if not h.UseJumpPower then h.UseJumpPower=true end h.JumpPower=v end end)
+slide(pages['Gerak'],'WalkSpeed',16,300,30,function(v) SavedWS=v SpeedDirty=true local c=lp.Character local h=c and c:FindFirstChildOfClass('Humanoid') if h then h.WalkSpeed=v end end,'ws')
+slide(pages['Gerak'],'JumpPower',50,300,50,function(v) SavedJP=v JumpDirty=true local c=lp.Character local h=c and c:FindFirstChildOfClass('Humanoid') if h then if not h.UseJumpPower then h.UseJumpPower=true end h.JumpPower=v end end,'jp')
 sect(pages['Gerak'],'TERBANG')
 slide(pages['Gerak'],'Fly Speed',20,200,70,function(v) S.flySpd=v end)
 tog(pages['Gerak'],'Fly (WASD + Spasi)','fly',function(on) setFly(on) end)
@@ -1140,15 +1141,122 @@ UIS.InputBegan:Connect(function(io,gp)
 	end
 end)
 
--- Jalan otomatis lagi setelah pindah lobby <-> match (teleport antar place)
+-- Jalan otomatis lagi setelah pindah lobby <-> match (teleport antar place).
+-- Sumber skrip = GitHub raw (versi terbaru), fallback file lokal.
+local AAD_GH='https://raw.githubusercontent.com/SanggonBoy/Arena-AirDrop/main/Arena%20AirDrop.lua'
+local AAD_LF='D:/New Downloads/RobloxForFun/Arena AirDrop/Arena AirDrop.lua'
 pcall(function()
 	if queue_on_teleport then
-		queue_on_teleport("loadstring(readfile('D:/New Downloads/RobloxForFun/Arena AirDrop/Arena AirDrop.lua'))()")
+		queue_on_teleport(([==[
+local r=getgenv().request
+if r then
+	local ok,res=pcall(r,{Url='%s',Method='GET'})
+	if ok and type(res)=='table' and res.StatusCode==200 and type(res.Body)=='string' and #res.Body>1000 then
+		loadstring(res.Body)()
+		return
+	end
+end
+pcall(function() loadstring(readfile('%s'))() end)
+]==]):format(AAD_GH,AAD_LF))
 	end
 end)
 
--- Helper console: AAD_SET('espM',true) / AAD_GET() dari executor
+-- ================= KONFIGURASI (save / load / auto) =================
+-- Semua fitur default OFF tiap eksekusi baru. Save menulis state S + WS/JP ke
+-- file JSON; toggle Auto ON = config langsung dipakai saat script dijalankan lagi
+-- (eksekusi manual / queue_on_teleport pasca-teleport).
+local CFGPATH='ArenaAirDrop-config.json'
+local function cfgSnapshot()
+	local c={SavedWS=SavedWS,SavedJP=SavedJP}
+	for k,v in pairs(S) do
+		if type(v)=='boolean' or type(v)=='number' then c[k]=v end
+	end
+	return c
+end
+local function applyCfg(c)
+	if type(c)~='table' then return 0 end
+	local n=0
+	for k,v in pairs(c) do
+		if k~='SavedWS' and k~='SavedJP' and S[k]~=nil and type(S[k])==type(v) then
+			S[k]=v n=n+1
+		end
+	end
+	-- slider: jalankan cb-nya supaya label + efek ikut (ws/jp pakai key 'ws'/'jp')
+	for _,r in ipairs(slideRegs) do
+		if r.key=='ws' and type(c.SavedWS)=='number' then pcall(r.set,c.SavedWS)
+		elseif r.key=='jp' and type(c.SavedJP)=='number' then pcall(r.set,c.SavedJP)
+		elseif r.key and S[r.key] then pcall(r.set,S[r.key]) end
+	end
+	-- repaint toggle + jalankan efeknya (kecuali cfgAuto: hindari save-during-load)
+	for k,ps in pairs(togPainters) do for _,p in ipairs(ps) do pcall(p) end end
+	for k,cb in pairs(togCbs) do
+		if k~='cfgAuto' then pcall(cb,S[k]) end
+	end
+	return n
+end
+local function doSave()
+	local ok,err=pcall(function()
+		game:GetService('HttpService'):JSONEncode(cfgSnapshot()) -- validasi dulu
+		writefile(CFGPATH,game:GetService('HttpService'):JSONEncode(cfgSnapshot()))
+	end)
+	if ok then
+		log('Config disimpan ('..CFGPATH..').')
+		showToast('💾 Config disimpan',Color3.fromRGB(120,255,160))
+	else
+		log('Gagal simpan: '..tostring(err))
+		showToast('💾 Gagal simpan',Color3.fromRGB(255,120,120))
+	end
+end
+local function doLoad(quiet)
+	local ok,raw=pcall(function() return readfile(CFGPATH) end)
+	if not ok or type(raw)~='string' or raw=='' then
+		log('Belum ada config. Tekan Save dulu.')
+		if not quiet then showToast('📂 Belum ada config',Color3.fromRGB(255,200,100)) end
+		return false
+	end
+	local ok2,c=pcall(function() return game:GetService('HttpService'):JSONDecode(raw) end)
+	if not ok2 or type(c)~='table' then
+		log('Config rusak (JSON tidak valid).')
+		if not quiet then showToast('📂 Config rusak',Color3.fromRGB(255,120,120)) end
+		return false
+	end
+	local n=applyCfg(c)
+	log('Config dimuat: '..n..' nilai.')
+	showToast('📂 Config dimuat ('..n..')',Color3.fromRGB(120,255,160))
+	return true
+end
+sect(pages['Lain'],'KONFIGURASI (simpan / muat ulang)')
+tog(pages['Lain'],'Auto-load config saat script jalan','cfgAuto',function(on)
+	if on then
+		doSave()
+		log('Auto-load AKTIF: config dipakai otomatis saat eksekusi/teleport berikutnya.')
+	else
+		log('Auto-load MATI: config tetap tersimpan, muat manual via tombol Load.')
+	end
+end)
+btn(pages['Lain'],'💾 Save konfigurasi (tulis file)',doSave)
+btn(pages['Lain'],'📂 Load konfigurasi (terapkan)',function() doLoad(false) end)
+btn(pages['Lain'],'🗑 Hapus file konfigurasi',function()
+	pcall(function() delfile(CFGPATH) end)
+	log('File config dihapus.')
+	showToast('🗑 Config dihapus',Color3.fromRGB(255,200,100))
+end)
+-- Boot: kalau config bilang Auto ON → langsung terapkan (tanpa klik apa pun).
+task.spawn(function()
+	task.wait(0.5)
+	local ok,raw=pcall(function() return readfile(CFGPATH) end)
+	if not ok or type(raw)~='string' or raw=='' then return end
+	local ok2,c=pcall(function() return game:GetService('HttpService'):JSONDecode(raw) end)
+	if not ok2 or type(c)~='table' or c.cfgAuto~=true then return end
+	local n=applyCfg(c)
+	log('Auto-load config: '..n..' nilai diterapkan.')
+	showToast('📂 Config auto-load ('..n..')',Color3.fromRGB(120,255,160))
+end)
+
+-- Helper console: AAD_SET('espM',true) / AAD_GET() / AAD_SAVE() / AAD_LOAD()
 ENV.AAD_SET=function(k,v) if S[k]==nil then return false end S[k]=v for _,p in ipairs(togPainters[k] or {}) do pcall(p) end if togCbs[k] then pcall(togCbs[k],v) end if k=='fly' then setFly(v) end return true end
 ENV.AAD_GET=function() local c={} for k,v in pairs(S) do c[k]=v end return c end
+ENV.AAD_SAVE=doSave
+ENV.AAD_LOAD=function() return doLoad(false) end
 
 print('[AAD] v2 Loaded by Alexander Jay (@absrdme)! Insert / RightShift = tampil/sembunyi. Tab Tempur: aimbot/triggerbot/ESP.')
