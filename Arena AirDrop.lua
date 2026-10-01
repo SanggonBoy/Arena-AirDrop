@@ -275,9 +275,14 @@ end
 -- PROBE DUKUNGAN require TANPA menyentuh module game (wajib sebelum UI No
 -- Spread, supaya label 🔒 sudah benar sejak pertama dilukis). ModuleScript
 -- probe milik kita sendiri → gagal di sini tidak meracuni apa pun milik game.
--- true = support, false/nil = tidak support / tak bisa dinilai (=kunci fitur).
+-- true = support, false = provider require ada tapi menolak (tidak support),
+-- nil  = tak bisa dinilai (gagal sebelum tahap require).
+-- CATATAN BUG 2026-10-04: versi lama membuang alasan kegagalan dan
+-- memperlakukan nil sebagai "tidak support" → Delta terkunci padahal
+-- require() jalan. Sekarang {stage,err} disimpan di ENV.AAD_PROBE supaya
+-- salah deteksi bisa ditelusuri, dan eksekutor terverifikasi aman (lihat
+-- AAD_SAFEEXEC) tidak dikunci walau probe bilang tidak support.
 local function probeRequire()
-	-- true = support, false = tidak support, nil = tak bisa diprobe
 	local stage='instance'
 	local ok,res=pcall(function()
 		local m=Instance.new('ModuleScript')
@@ -287,24 +292,36 @@ local function probeRequire()
 		stage='require'
 		local okR,v=pcall(function() return require(m) end)
 		pcall(function() m:Destroy() end)
-		if not okR then return false end
-		return v==true
+		if not okR then error(v) end
+		if v~=true then error('hasil require = '..type(v)) end
+		return true
 	end)
-	if ok and res==true then return true end
-	if ok then return false end
-	if stage~='require' then return nil end
-	return false
+	ENV.AAD_PROBE={stage=stage,err=ok and nil or tostring(res)}
+	if ok then return true end
+	return stage=='require' and false or nil
 end
 local showToast -- forward: diisi di bawah (dipakai alert tombol-terkunci)
--- Jalankan probe SEKARANG (sebelum UI No Spread dibuat → label 🔒 akurat).
-if ENV.AAD_REQSUPPORT==nil then ENV.AAD_REQSUPPORT=probeRequire() end
-ENV.AAD_REQFAIL=(ENV.AAD_REQSUPPORT~=true)
-local AAD_REQFAIL=ENV.AAD_REQFAIL
 local AAD_EXEC='?'
 pcall(function()
 	local ex=identifyexecutor and select(1,identifyexecutor())
 	if ex then AAD_EXEC=tostring(ex) end
 end)
+-- Executor yang TERVERIFIKASI aman (require modul game jalan, patch beres):
+-- kalau probe bilang tidak support padahal ini eksekutor ini → false negative,
+-- jangan kunci. Tambah entri di sini hanya setelah terbukti live.
+local AAD_SAFEEXEC=({['delta']=true})[string.lower(AAD_EXEC)]==true
+-- Jalankan probe SEKARANG (sebelum UI No Spread dibuat → label 🔒 akurat).
+-- Hanya hasil true yang di-cache; hasil lain di-probe ulang tiap eksekusi file
+-- (mis. setelah pindah executor di sesi yang sama).
+if ENV.AAD_REQSUPPORT~=true then
+	ENV.AAD_REQSUPPORT=probeRequire()
+	if ENV.AAD_REQSUPPORT~=true and AAD_SAFEEXEC then
+		ENV.AAD_REQSUPPORT=true
+		pcall(function() log('No Spread: probe false-negative di "'..AAD_EXEC..'" (stage='..tostring(ENV.AAD_PROBE and ENV.AAD_PROBE.stage)..', err='..tostring(ENV.AAD_PROBE and ENV.AAD_PROBE.err)..') → diterima sebagai support (executor terverifikasi).') end)
+	end
+end
+ENV.AAD_REQFAIL=(ENV.AAD_REQSUPPORT~=true)
+local AAD_REQFAIL=ENV.AAD_REQFAIL
 local side=mk('Frame',{Position=UDim2.new(0,10,0,46),Size=UDim2.new(0,128,1,-56),BackgroundColor3=Color3.fromRGB(20,24,32),BorderSizePixel=0},main)
 cr(side,10)
 local body=mk('Frame',{Position=UDim2.new(0,146,0,46),Size=UDim2.new(1,-156,1,-56),BackgroundTransparency=1},main)
@@ -403,7 +420,11 @@ tog(pages['Tempur'],'No Spread (peluru lurus, tanpa sebar)','noSpread',function(
 	if AAD_REQFAIL then
 		-- executor tidak mendukung: tombol terkunci, hanya tampilkan panduan
 		S.noSpread=false NS.on=false -- config lama bisa membawa true; paksa OFF
-		log('No Spread terkunci: executor "'..AAD_EXEC..'" tidak mendukung require() modul game. Ganti executor lain (mis. Delta) untuk memakai fitur ini.')
+		local why=''
+		if ENV.AAD_PROBE then
+			why=' (probe stage='..tostring(ENV.AAD_PROBE.stage)..', err='..tostring(ENV.AAD_PROBE.err)..')'
+		end
+		log('No Spread terkunci: executor "'..AAD_EXEC..'" gagal probe require() modul game'..why..'. Kalau executor ini sebenarnya aman, laporkan stage/err ini agar ditambahkan ke AAD_SAFEEXEC.')
 		showToast('🔒 No Spread tidak didukung executor ini',Color3.fromRGB(255,150,120))
 		return
 	end
@@ -926,9 +947,13 @@ end
 -- respawn 2026-10-03). patchBlaster menghormati gate itu.
 pcall(function()
 	if AAD_REQFAIL then
-		log('TIDAK DIDUKUNG: executor "'..AAD_EXEC..'" memblokir require() modul game → fitur No Spread terkunci. Fitur butuh module injection; tanpa itu tidak bisa jalan & berisiko merusak senjata saat respawn. Ganti executor lain (mis. Delta) untuk memakainya.')
+		local why=''
+		if ENV.AAD_PROBE then
+			why=' [probe stage='..tostring(ENV.AAD_PROBE.stage)..', err='..tostring(ENV.AAD_PROBE.err)..']'
+		end
+		log('TIDAK DIDUKUNG: executor "'..AAD_EXEC..'" gagal probe require() → fitur No Spread terkunci'..why..' . Untuk aktif tambahkan ke AAD_SAFEEXEC kalau executor ini terbukti aman.')
 	else
-		log('No Spread: support ('..AAD_EXEC..', require OK).')
+		log('No Spread: support ('..AAD_EXEC..', probe OK).')
 	end
 end)
 do
