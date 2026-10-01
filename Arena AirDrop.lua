@@ -53,6 +53,12 @@ local S={
 	espM=false, espB=false,
 	magnetOrb=false, magnetRange=60,
 	cfgAuto=false, -- auto-load konfigurasi tersimpan saat script jalan/teleport
+	-- server hop + pilih platform (HP = place mobile, PC = place laptop)
+	srvPlatHP=false, srvPlatPC=false, srvPlatAuto=true,
+	hopSepi=true, hopRamai=false,
+	hopPingMax=150, hopFpsMin=30,
+	hopSkipFull=true, hopSkipVisit=true,
+	hopPingLimit=200, hopMaxTry=6,
 }
 local SavedWS, SavedJP = 30, 50 -- WS asli game ini 30 (terverifikasi live)
 local SpeedDirty, JumpDirty = false, false
@@ -258,7 +264,7 @@ cr(side,10)
 local body=mk('Frame',{Position=UDim2.new(0,146,0,46),Size=UDim2.new(1,-156,1,-56),BackgroundTransparency=1},main)
 local pages={}
 local tabBtns={}
-local tabDefs={'Gerak','Lihat','Tempur','Lain'}
+local tabDefs={'Gerak','Lihat','Tempur','Server','Lain'}
 for i,nm in ipairs(tabDefs) do
 	local b=mk('TextButton',{Size=UDim2.new(1,-12,0,36),Position=UDim2.new(0,6,0,(i-1)*42+8),Text=nm,Font=Enum.Font.Gotham,TextSize=13,TextColor3=Color3.fromRGB(200,195,190),BackgroundColor3=Color3.fromRGB(26,31,41),BorderSizePixel=0,AutoButtonColor=true},side)
 	cr(b,8)
@@ -1385,6 +1391,303 @@ btn(pages['Lain'],'🗑 Hapus file konfigurasi',function()
 	showToast('🗑 Config dihapus',Color3.fromRGB(255,200,100))
 end)
 -- Boot: kalau config bilang Auto ON → langsung terapkan (tanpa klik apa pun).
+-- ================= TAB SERVER (server hop + pilih platform HP/PC) =================
+-- Platform game ini BUKAN satu tempat (CONST.ServerPlaceId, terverifikasi live 2026-10-03):
+--   Lobby/PC = 93091759101123 | Mobile/HP = 101856978106392 (universe sama
+--   10031505426 → cheat tetap hidup, tidak perlu ganti file).
+-- Pop-up "MOBILE SERVERS" milik game = SendSwitchPlaceReq via remote Main (proto
+-- 2514, FireServer({2514,{placeId=..}})) yang jalan server-side. Dari cheat yang
+-- aman & resmi: hop antar-server via API games.roblox.com + pindah place via
+-- TeleportService (teleport server, bukan CFrame).
+local PLACE_PC,PLACE_HP=93091759101123,101856978106392
+local SH={busy=false}
+local function curPing()
+	local p=nil
+	pcall(function()
+		local it=game:GetService('Stats').Network.ServerStatsItem:FindFirstChild('Data Ping')
+		p=it and it:GetValue()
+	end)
+	return p
+end
+local function platNow() return game.PlaceId==PLACE_HP and 'HP' or 'PC' end
+local function platTag(p) return p=='HP' and 'HP (mobile)' or 'PC (laptop)' end
+local function placeOf(p) return p=='HP' and PLACE_HP or PLACE_PC end
+local function wantPlat()
+	if S.srvPlatHP then return 'HP' end
+	if S.srvPlatPC then return 'PC' end
+	return TouchMode and 'HP' or 'PC' -- auto: perangkat sentuh → HP
+end
+-- State hop bertahan lintas teleport (getgenv): rantai retry per platform.
+ENV.AAD_HOP=ENV.AAD_HOP or {untilGood=false,to=nil,landedAt=0,limit=200,tries={HP=1,PC=1}}
+local HOP=ENV.AAD_HOP
+HOP.landedAt=os.clock() -- tiap load = baru mendarat
+HOP.tries=HOP.tries or {HP=1,PC=1}
+-- Preferensi bertahan teleport (tanpa ini: "Paksa HP" hilang tiap hop).
+local HPREF=ENV.AAD_HOPPREF
+if type(HPREF)=='table' then
+	S.srvPlatHP=HPREF.hp==true
+	S.srvPlatPC=HPREF.pc==true
+	S.srvPlatAuto=(not S.srvPlatHP) and (not S.srvPlatPC)
+	S.hopSepi=HPREF.sep~=false
+	S.hopRamai=HPREF.ram==true
+	S.hopPingMax=HPREF.pmax or S.hopPingMax
+	S.hopFpsMin=HPREF.fmin or S.hopFpsMin
+	S.hopSkipFull=HPREF.sf~=false
+	S.hopSkipVisit=HPREF.sv~=false
+	S.hopPingLimit=HPREF.plim or S.hopPingLimit
+	S.hopMaxTry=HPREF.mt or S.hopMaxTry
+end
+local function saveHP()
+	ENV.AAD_HOPPREF={
+		hp=S.srvPlatHP,pc=S.srvPlatPC,sep=S.hopSepi,ram=S.hopRamai,
+		pmax=S.hopPingMax,fmin=S.hopFpsMin,sf=S.hopSkipFull,sv=S.hopSkipVisit,
+		plim=S.hopPingLimit,mt=S.hopMaxTry,
+	}
+end
+local function repaintTog(k)
+	for _,p in ipairs(togPainters[k] or {}) do pcall(p) end
+end
+local function rememberLastPing()
+	local j=game.JobId or ''
+	if #j<8 then return end
+	local p=curPing()
+	if not p or p<10 then return end
+	ENV.AAD_PING=ENV.AAD_PING or {}
+	ENV.AAD_PING[j]=math.floor(p)
+	if p>S.hopPingLimit then
+		ENV.AAD_BAD=ENV.AAD_BAD or {}
+		ENV.AAD_BAD[j]=math.floor(p)
+		ENV.AAD_VISITED=ENV.AAD_VISITED or {}
+		ENV.AAD_VISITED[j]=true
+	end
+end
+ord=ord+1
+local srvInfo=mk('TextLabel',{Size=UDim2.new(1,-4,0,22),BackgroundTransparency=1,Text='…',Font=Enum.Font.GothamBold,TextSize=13,TextColor3=Color3.fromRGB(140,190,255),TextXAlignment=Enum.TextXAlignment.Left,TextTruncate=Enum.TextTruncate.AtEnd,LayoutOrder=ord},pages['Server'])
+ord=ord+1
+local srvStatus=mk('TextLabel',{Size=UDim2.new(1,-4,0,52),BackgroundColor3=Color3.fromRGB(24,28,38),Text='Siap. Tombol di bawah mengambil daftar live dari API Roblox.',Font=Enum.Font.Gotham,TextSize=11,TextColor3=Color3.fromRGB(205,200,195),TextWrapped=true,TextYAlignment=Enum.TextYAlignment.Top,BorderSizePixel=0,LayoutOrder=ord},pages['Server'])
+cr(srvStatus,8)
+local C_WARN,C_ERR,C_OK,C_DIM=Color3.fromRGB(255,200,100),Color3.fromRGB(255,120,120),Color3.fromRGB(120,255,160),Color3.fromRGB(150,160,180)
+local function setSrvStatus(t,col)
+	srvStatus.Text=t
+	srvStatus.TextColor3=col or Color3.fromRGB(205,200,195)
+end
+local function srvRequest()
+	local ok,g=pcall(getgenv)
+	if ok and type(g)=='table' and type(g.request)=='function' then return g.request end
+	if type(request)=='function' then return request end
+	return nil
+end
+local function httpGet(url)
+	local f=srvRequest()
+	if not f then return nil,'request() tidak ada' end
+	for i=1,3 do
+		local ok,res=pcall(f,{Url=url,Method='GET'})
+		if ok and type(res)=='table' then
+			local code=tonumber(res.StatusCode) or 0
+			if code==200 and type(res.Body)=='string' then return res.Body end
+			if code==429 then task.wait(2*i) else return nil,'HTTP '..code end
+		else task.wait(1) end
+	end
+	return nil,'HTTP gagal x3'
+end
+local function fetchServers(pid)
+	local all,cursor={},nil
+	for _=1,4 do
+		local url='https://games.roblox.com/v1/games/'..pid..'/servers/Public?sortOrder=Asc&limit=100'
+		if cursor then url=url..'&cursor='..cursor end
+		local body,err=httpGet(url)
+		if not body then return nil,err end
+		local okd,d=pcall(function() return game:GetService('HttpService'):JSONDecode(body) end)
+		if not okd or type(d)~='table' or type(d.data)~='table' then return nil,'JSON rusak' end
+		for _,s in ipairs(d.data) do all[#all+1]=s end
+		cursor=d.nextPageCursor
+		if not cursor then break end
+		task.wait(0.6)
+	end
+	return all
+end
+local function getFiltered(plat)
+	local list,err=fetchServers(placeOf(plat))
+	if not list then return nil,err end
+	local cur=game.JobId
+	local vis=ENV.AAD_VISITED or {}
+	local bad=ENV.AAD_BAD or {}
+	local out={}
+	for _,s in ipairs(list) do
+		local fpsOK=(s.fps==nil) or (tonumber(s.fps) or 0)>=S.hopFpsMin
+		if s.id~=cur and type(s.id)=='string' and not bad[s.id]
+			and type(s.ping)=='number' and s.ping<=S.hopPingMax
+			and fpsOK
+			and (not S.hopSkipFull or (tonumber(s.playing) or 0)<(tonumber(s.maxPlayers) or 99))
+			and (not S.hopSkipVisit or not vis[s.id]) then
+			out[#out+1]=s
+		end
+	end
+	local mode=S.hopSepi and 'sep' or (S.hopRamai and 'ram' or nil)
+	table.sort(out,function(a,b)
+		if mode=='sep' and a.playing~=b.playing then return a.playing<b.playing end
+		if mode=='ram' and a.playing~=b.playing then return a.playing>b.playing end
+		if a.ping~=b.ping then return a.ping<b.ping end
+		return (tonumber(a.fps) or 0)>(tonumber(b.fps) or 0)
+	end)
+	return out
+end
+local function hopTo(s,plat,autoChain)
+	if SH.busy then setSrvStatus('Masih memproses pindah…',C_WARN) return end
+	local pid=placeOf(plat)
+	SH.busy=true
+	rememberLastPing()
+	ENV.AAD_VISITED=ENV.AAD_VISITED or {}
+	ENV.AAD_VISITED[s.id]=true
+	HOP.to=plat HOP.limit=S.hopPingLimit
+	if not autoChain then HOP.tries[plat]=1 end
+	HOP.untilGood=true -- lanjut rantai: kalau ping nyata jelek → hop lagi
+	setSrvStatus(string.format('Pindah %s → server %s · ping API %dms · %d/%d pemain · %s',
+		platNow(),platTag(plat),tonumber(s.ping) or 0,tonumber(s.playing) or 0,tonumber(s.maxPlayers) or 0,s.id:sub(1,8)),C_OK)
+	local ok,err=pcall(function() TeleportService:TeleportToPlaceInstance(pid,s.id,lp) end)
+	if not ok then
+		SH.busy=false
+		HOP.untilGood=false
+		setSrvStatus('Gagal teleport: '..tostring(err),C_ERR)
+	end
+end
+local function hopPick(plat,label)
+	setSrvStatus('Mengambil daftar server '..platTag(plat)..'…',C_DIM)
+	local out,err=getFiltered(plat)
+	if not out then setSrvStatus('Gagal: '..tostring(err),C_ERR) return end
+	if #out==0 then
+		setSrvStatus('Tidak ada server '..platTag(plat)..' cocok (ping api ≤'..S.hopPingMax
+			..(S.hopSkipFull and ' · tanpa penuh' or '')
+			..(S.hopSkipVisit and ' · lewati yang pernah' or '')
+			..'). Longgarkan filter / tekan tombol 🧹.',C_WARN)
+		return
+	end
+	setSrvStatus(label..' → '..platTag(plat)..' · kandidat teratas: ping API '..out[1].ping..'ms · '
+		..out[1].playing..'/'..out[1].maxPlayers..' · '..#out..' cocok',C_DIM)
+	hopTo(out[1],plat,false)
+end
+sect(pages['Server'],'PILIH PLATFORM TUJUAN')
+local PLATKEYS={'srvPlatHP','srvPlatPC','srvPlatAuto'}
+local function repaintPlat() for _,k in ipairs(PLATKEYS) do repaintTog(k) end end
+local function radio(page,txt,key)
+	return tog(page,txt,key,function(on)
+		if on then
+			for _,k in ipairs(PLATKEYS) do if k~=key then S[k]=false end end
+		elseif not (S.srvPlatHP or S.srvPlatPC or S.srvPlatAuto) then
+			S[key]=true -- cegah semua OFF (klik UI maupun applyCfg)
+		end
+		repaintPlat() saveHP()
+	end)
+end
+radio(pages['Server'],'Paksa server HP (mobile)','srvPlatHP')
+radio(pages['Server'],'Paksa server PC (laptop)','srvPlatPC')
+radio(pages['Server'],'Otomatis (deteksi perangkatku)','srvPlatAuto')
+sect(pages['Server'],'FILTER (daftar live dari API Roblox)')
+slide(pages['Server'],'Maks ping server (ms)',30,400,150,function(v) S.hopPingMax=v saveHP() end,'hopPingMax')
+slide(pages['Server'],'Min FPS server',0,60,30,function(v) S.hopFpsMin=v saveHP() end,'hopFpsMin')
+tog(pages['Server'],'Prioritas server SEPI','hopSepi',function(on) if on then S.hopRamai=false repaintTog('hopRamai') end saveHP() end)
+tog(pages['Server'],'Prioritas server RAMAI','hopRamai',function(on) if on then S.hopSepi=false repaintTog('hopSepi') end saveHP() end)
+tog(pages['Server'],'Lewati server penuh (isi = max)','hopSkipFull',function() saveHP() end)
+tog(pages['Server'],'Lewati server pernah dikunjungi','hopSkipVisit',function() saveHP() end)
+sect(pages['Server'],'PINDAH SERVER')
+btn(pages['Server'],'🔀 Pindah ke server HP',function()
+	S.srvPlatHP=true S.srvPlatPC=false S.srvPlatAuto=false repaintPlat() saveHP()
+	hopPick('HP','Server HP')
+end)
+btn(pages['Server'],'💻 Pindah ke server PC',function()
+	S.srvPlatHP=false S.srvPlatPC=true S.srvPlatAuto=false repaintPlat() saveHP()
+	hopPick('PC','Server PC')
+end)
+btn(pages['Server'],'🎲 Pindah acak (pakai target)',function()
+	local plat=wantPlat()
+	local out,err=getFiltered(plat)
+	if not out then setSrvStatus('Gagal: '..tostring(err),C_ERR) return end
+	if #out==0 then setSrvStatus('Tidak ada server '..platTag(plat)..' cocok.',C_WARN) return end
+	hopTo(out[math.random(#out)],plat,false)
+end)
+btn(pages['Server'],'📋 Lihat kandidat (tanpa pindah)',function()
+	local plat=wantPlat()
+	setSrvStatus('Mengambil daftar server '..platTag(plat)..'…',C_DIM)
+	local out,err=getFiltered(plat)
+	if not out then setSrvStatus('Gagal: '..tostring(err),C_ERR) return end
+	if #out==0 then setSrvStatus('Tidak ada server '..platTag(plat)..' cocok.',C_WARN) return end
+	local t={}
+	for i=1,math.min(#out,4) do
+		t[#t+1]=string.format('#%d ping=%d %d/%d',i,tonumber(out[i].ping) or 0,tonumber(out[i].playing) or 0,tonumber(out[i].maxPlayers) or 0)
+	end
+	setSrvStatus(platTag(plat)..' · '..#out..' cocok → '..table.concat(t,' · '),C_OK)
+end)
+btn(pages['Server'],'🧹 Lupakan blacklist ping',function()
+	ENV.AAD_BAD={} ENV.AAD_PING={} ENV.AAD_VISITED={}
+	rememberLastPing()
+	setSrvStatus('Blacklist ping dibersihkan (server ini ditandai lagi kalau jelek).',C_DIM)
+end)
+sect(pages['Server'],'AUTO-LANJUT (ping nyataku jelek → hop lagi)')
+slide(pages['Server'],'Batas ping NYATA (ms)',100,500,200,function(v) S.hopPingLimit=v saveHP() end,'hopPingLimit')
+slide(pages['Server'],'Jumlah percobaan per platform',1,12,6,function(v) S.hopMaxTry=v saveHP() end,'hopMaxTry')
+-- Lanjut rantai: setelah reload di server baru, tunggu ping stabil 8 detik; kalau
+-- masih jelek dan belum habis percobaan → hop lagi (platform yang sama). Berhenti
+-- saat ping bagus. Kalau mendarat di platform yang salah → hentikan rantai.
+task.spawn(function()
+	while alive() do
+		task.wait(2)
+		if HOP.untilGood and not SH.busy and os.clock()-HOP.landedAt>8 then
+			local plat=HOP.to or wantPlat()
+			if platNow()~=plat then
+				HOP.untilGood=false
+				setSrvStatus('Mendarat di server '..platNow()..' (server '..platTag(plat)..' penuh?) — rantai auto berhenti.',C_WARN)
+			else
+				local p=curPing()
+				local tries=HOP.tries[plat] or 1
+				if p and p>HOP.limit then
+					rememberLastPing()
+					if tries>=S.hopMaxTry then
+						HOP.untilGood=false
+						setSrvStatus('Berhenti setelah '..tries..'x coba — semua server '..platTag(plat)..' ping ≥'..math.floor(HOP.limit)..'ms.',C_WARN)
+					else
+						setSrvStatus('Coba #'..(tries+1)..': ping nyata '..math.floor(p)..'ms > '..math.floor(HOP.limit)..' → pindah server '..platTag(plat)..' lagi…',C_WARN)
+						task.wait(1)
+						local out,err=getFiltered(plat)
+						if not out then
+							HOP.untilGood=false
+							setSrvStatus('Gagal: '..tostring(err),C_ERR)
+						elseif #out==0 then
+							HOP.untilGood=false
+							setSrvStatus('Tidak ada server '..platTag(plat)..' cocok lagi — longgarkan filter.',C_WARN)
+						else
+							HOP.tries[plat]=tries+1
+							hopTo(out[1],plat,true)
+						end
+					end
+				elseif p then
+					HOP.untilGood=false
+					setSrvStatus('Selesai: ping nyata '..math.floor(p)..'ms · server '..platTag(plat)..' ✓',C_OK)
+				end
+			end
+		end
+	end
+end)
+-- Info server sekarang (Stats = ping asli ke server ini).
+task.spawn(function()
+	while alive() do
+		task.wait(2)
+		local p=curPing()
+		if srvInfo then
+			srvInfo.Text=string.format('Server %s · %d/%d · Job %s · Ping %s → %s',
+				platNow(),#Players:GetPlayers(),Players.MaxPlayers,(#game.JobId>0) and game.JobId:sub(1,8) or '-',
+				p and math.floor(p)..'ms' or '?',platTag(wantPlat()))
+			srvInfo.TextColor3=(p and p>=200) and C_ERR or (p and p>=100 and C_WARN or C_OK)
+		end
+	end
+end)
+-- Sinkron tampilan dengan pref yang di-restore (toggle repaint + label slider hop).
+task.spawn(function()
+	task.wait(0.5)
+	for _,k in ipairs({'srvPlatHP','srvPlatPC','srvPlatAuto','hopSepi','hopRamai','hopSkipFull','hopSkipVisit'}) do repaintTog(k) end
+	for _,r in ipairs(slideRegs) do
+		if r.key and r.key:sub(1,3)=='hop' and S[r.key] then pcall(r.set,S[r.key]) end
+	end
+end)
 task.spawn(function()
 	task.wait(0.5)
 	local ok,raw=pcall(function() return readfile(CFGPATH) end)
