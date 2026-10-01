@@ -10,6 +10,12 @@
 -- WalkSpeed asli 30, JumpPower 50, 7 pemain, tanpa tim (FFA).
 -- Toggle: Insert / RightShift / tombol AAD. Semua default OFF, tidak menulis
 -- gerakan sebelum user menyentuh slider (pola anti-flicker + anti dobel-jalan).
+-- GUARD: queue_on_teleport Xeno GLOBAL → file bisa dieksekusi di game lain.
+-- PlaceId resmi 93091759101123 (diizinkan juga universe 10031505426 bila pindah place).
+if game.PlaceId~=93091759101123 and game.GameId~=10031505426 then
+	warn('[AAD] Dilewati: cheat ini untuk Arena AirDrop, bukan game lain (place '..tostring(game.PlaceId)..')')
+	return
+end
 
 local Players=game:GetService('Players')
 local RS=game:GetService('ReplicatedStorage')
