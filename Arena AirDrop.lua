@@ -768,50 +768,78 @@ task.spawn(function()
 end)
 
 -- ================= NO SPREAD (peluru lurus) =================
--- Fakta terverifikasi dari kode game (ReplicatedStorage.Scripts.Net.NetMessage,
--- Model.Blaster): semua aksi lewat 1 RemoteEvent "Main". NetMessage:FireServer
--- memanggil Main:FireServer({protoId, params}). Peluru memakai
--- Blaster_ShootReq -> params = {origin, rayDirections, rayResults, ...}
--- Arah peluru (rayDirections) dihitung DI CLIENT lalu dikirim ke server,
--- jadi di situlah letak sebar (spread) peluru.
--- Hook FireServer: rapatkan semua arah ray ke garis tengah kamera = peluru lurus.
--- Hook dipasang SEKALI seumur client dan dikendalikan flag di getgenv()
--- (ENV.AAD_NS). Kalau tiap reload memasang hook baru, hook generasi lama
--- tetap hidup dan ikut menulis arah ray walau toggle sudah OFF.
+-- Fakta terverifikasi dari kode game (ReplicatedStorage.Scripts.Model.Blaster):
+-- arah peluru (rayDirections) + hasil raycast (rayResults) dihitung DI CLIENT
+-- oleh Blaster:GetRayResults() memakai Blaster:GetSpread() — di situlah sebar
+-- peluru berasal (hip-fire besar, scope kecil). Jadi fix paling bersih:
+--   patch Blaster.GetSpread() agar selalu return 0 → hip-fire & scope lurus.
+-- Butuh executor dengan require() (Xeno laptop: require diblokir → fallback
+-- hook FireServer di bawah; di executor HP ini require jalan).
 local NS=ENV.AAD_NS
 if type(NS)~='table' then
-	NS={on=false,hooked=false,shots=0,dirs=0,logs={}}
+	NS={on=false,hooked=false,patched=false,shots=0,dirs=0,logs={}}
 	ENV.AAD_NS=NS
+else
+	-- File dijalankan ulang (eksekusi manual / queue pasca-teleport). Module
+	-- cache BISA baru (teleport) → wrapper lama tidak terpasang lagi, jadi
+	-- flag direset dan dipasang ulang oleh "if S.noSpread" di bawah.
+	-- origSpread/lastWrapped TIDAK direset (identitas wrapper dipakai patchBlaster
+	-- untuk membedakan cache baru vs wrapper lama yang masih terpasang).
+	NS.patched=false NS.hooked=false NS.blaster=nil
 end
 local MainRemote=RS:FindFirstChild('RemoteEvent') and RS.RemoteEvent:FindFirstChild('Main')
 local function straighten(payload)
+	-- Fallback: rayDirections = vektor offset dunia (arah*range), bukan posisi.
+	-- Rapatkan: offset jadi look*range → semua ray lurus ke tengah kamera.
 	if type(payload)~='table' then return end
 	local params=payload[2]
 	if type(params)~='table' then return end
 	local dirs=params.rayDirections
 	if type(dirs)~='table' or #dirs<1 then return end
-	local origin=params.origin
 	local cam=Workspace.CurrentCamera
-	if not cam or not origin then return end
+	if not cam then return end
 	local look=cam.CFrame.LookVector
-	local okPos
-	if typeof(origin)=='Vector3' then okPos=origin
-	elseif typeof(origin)=='CFrame' then okPos=origin.Position end
-	if not okPos then return end
 	for i=1,#dirs do
 		local d=dirs[i]
 		if typeof(d)=='Vector3' then
-			local r=(d-okPos).Magnitude
-			if r>1 then dirs[i]=okPos+look*r end
+			dirs[i]=look*d.Magnitude
 		end
 	end
 end
+local function patchBlaster()
+	-- require modul Blaster → patch GetSpread→0. Return true kalau berhasil.
+	local ok,err=pcall(function()
+		local Blaster=require(RS.Scripts.Model.Blaster)
+		if type(Blaster)~='table' or type(Blaster.GetSpread)~='function' then error('GetSpread tak ada') end
+		-- Hanya simpan "asli" kalau current BUKAN wrapper lama kita (identitas dari
+		-- NS.lastWrapped). Kalau cache sama + wrapper lama masih terpasang, origSpread
+		-- yang lama (fungsi asli) tetap benar — jangan timpa dengan wrapper.
+		local cur=Blaster.GetSpread
+		if not NS.origSpread or NS.lastWrapped~=cur then
+			NS.origSpread=cur
+		end
+		local orig=NS.origSpread
+		local wrapped=function(self,...)
+			if NS.on then return 0 end
+			return orig(self,...)
+		end
+		Blaster.GetSpread=wrapped
+		NS.lastWrapped=wrapped
+		NS.blaster=Blaster
+		NS.patched=true
+		NS.logs[#NS.logs+1]='patch GetSpread OK'
+	end)
+	if not ok and #NS.logs<8 then NS.logs[#NS.logs+1]='patch gagal: '..tostring(err) end
+	return ok
+end
 hookNoSpread=function()
 	NS.on=true
+	if NS.patched then return true end
+	if patchBlaster() then NS.hooked=true return true end
+	-- Fallback (executor tanpa require): hook FireServer.
 	if NS.hooked then return true end
 	if not MainRemote then return false end
 	local orig=MainRemote.FireServer
-	-- simpan fungsi asli supaya bisa dipulihkan (Xeno tidak punya restorefunction)
 	NS.orig=NS.orig or orig
 	local realOrig=NS.orig
 	local ok=pcall(function()
@@ -823,15 +851,10 @@ hookNoSpread=function()
 						if type(a[2])=='table' and type(a[2].rayDirections)=='table' then
 							NS.shots=NS.shots+1
 							local rd=a[2].rayDirections
-							local o=a[2].origin
 							if #NS.logs<8 then
-								-- baca aman: format payload belum 100% pasti
 								local okM,mag=pcall(function() return rd[1].Magnitude end)
 								NS.logs[#NS.logs+1]='#'..NS.shots..' proto='..tostring(a[1])
-									..' nDir='..#rd
-									..' origin='..typeof(o)
-									..' dir1='..typeof(rd[1])
-									..' mag='..tostring(okM and mag)
+									..' nDir='..#rd..' mag='..tostring(okM and mag)
 								NS.dirs=NS.dirs+#rd
 							end
 							straighten(a)
@@ -847,6 +870,12 @@ hookNoSpread=function()
 end
 unhookNoSpread=function()
 	NS.on=false
+	if NS.patched and NS.blaster and NS.origSpread then
+		pcall(function() NS.blaster.GetSpread=NS.origSpread end)
+		NS.patched=false
+		NS.hooked=false
+		return
+	end
 	if not NS.hooked or not NS.orig then return end
 	pcall(function() hookfunction(MainRemote.FireServer,NS.orig) end)
 	NS.hooked=false
