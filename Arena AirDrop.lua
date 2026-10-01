@@ -190,21 +190,34 @@ local function sect(page,txt)
 	ord=ord+1
 	mk('TextLabel',{Size=UDim2.new(1,-4,0,20),BackgroundTransparency=1,Text=txt,Font=Enum.Font.GothamBold,TextSize=12,TextColor3=Color3.fromRGB(120,180,255),TextXAlignment=Enum.TextXAlignment.Left,LayoutOrder=ord},page)
 end
-local function tog(page,txt,key,cb)
+local function tog(page,txt,key,cb,lockFn)
 	ord=ord+1
 	local b=mk('TextButton',{Size=UDim2.new(1,-4,0,34),BackgroundColor3=Color3.fromRGB(28,33,44),Text='',Font=Enum.Font.Gotham,TextSize=13,TextColor3=Color3.fromRGB(215,210,205),TextXAlignment=Enum.TextXAlignment.Left,BorderSizePixel=0,LayoutOrder=ord},page)
 	mk('UIPadding',{PaddingLeft=UDim.new(0,12)},b)
 	cr(b,8)
+	local function locked() return lockFn and lockFn() end
 	local function paint()
 		local on=S[key]
-		b.Text=txt..'      '..(on and '● ON' or '○ OFF')
-		b.BackgroundColor3=on and Color3.fromRGB(40,85,150) or Color3.fromRGB(28,33,44)
+		if locked() then
+			b.Text=txt..'      🔒 LOCKED'
+			b.BackgroundColor3=Color3.fromRGB(38,34,34)
+			b.TextColor3=Color3.fromRGB(150,140,140)
+		else
+			b.Text=txt..'      '..(on and '● ON' or '○ OFF')
+			b.BackgroundColor3=on and Color3.fromRGB(40,85,150) or Color3.fromRGB(28,33,44)
+			b.TextColor3=Color3.fromRGB(215,210,205)
+		end
 	end
 	paint()
 	togPainters[key]=togPainters[key] or {}
 	table.insert(togPainters[key],paint)
 	if cb then togCbs[key]=cb end
 	b.MouseButton1Click:Connect(function()
+		if locked() then
+			-- tidak berubah state; pemanggil (cb) menampilkan alert+panduan
+			if cb then cb(S[key]) end
+			return
+		end
 		S[key]=not S[key]
 		paint()
 		if cb then cb(S[key]) end
@@ -259,6 +272,39 @@ local function slide(page,txt,min,max,def,cb,key)
 end
 
 -- ================= TABS =================
+-- PROBE DUKUNGAN require TANPA menyentuh module game (wajib sebelum UI No
+-- Spread, supaya label 🔒 sudah benar sejak pertama dilukis). ModuleScript
+-- probe milik kita sendiri → gagal di sini tidak meracuni apa pun milik game.
+-- true = support, false/nil = tidak support / tak bisa dinilai (=kunci fitur).
+local function probeRequire()
+	-- true = support, false = tidak support, nil = tak bisa diprobe
+	local stage='instance'
+	local ok,res=pcall(function()
+		local m=Instance.new('ModuleScript')
+		m.Name='AAD_REQ_PROBE'
+		stage='source'
+		m.Source='return true'
+		stage='require'
+		local okR,v=pcall(function() return require(m) end)
+		pcall(function() m:Destroy() end)
+		if not okR then return false end
+		return v==true
+	end)
+	if ok and res==true then return true end
+	if ok then return false end
+	if stage~='require' then return nil end
+	return false
+end
+local showToast -- forward: diisi di bawah (dipakai alert tombol-terkunci)
+-- Jalankan probe SEKARANG (sebelum UI No Spread dibuat → label 🔒 akurat).
+if ENV.AAD_REQSUPPORT==nil then ENV.AAD_REQSUPPORT=probeRequire() end
+ENV.AAD_REQFAIL=(ENV.AAD_REQSUPPORT~=true)
+local AAD_REQFAIL=ENV.AAD_REQFAIL
+local AAD_EXEC='?'
+pcall(function()
+	local ex=identifyexecutor and select(1,identifyexecutor())
+	if ex then AAD_EXEC=tostring(ex) end
+end)
 local side=mk('Frame',{Position=UDim2.new(0,10,0,46),Size=UDim2.new(0,128,1,-56),BackgroundColor3=Color3.fromRGB(20,24,32),BorderSizePixel=0},main)
 cr(side,10)
 local body=mk('Frame',{Position=UDim2.new(0,146,0,46),Size=UDim2.new(1,-156,1,-56),BackgroundTransparency=1},main)
@@ -354,14 +400,21 @@ end)
 slide(pages['Tempur'],'Ukuran Kepala (1 - 8)',1,8,3,function(v) S.headSize=v if S.bigHead then applyBigHead() end end)
 sect(pages['Tempur'],'NO SPREAD (peluru lurus)')
 tog(pages['Tempur'],'No Spread (peluru lurus, tanpa sebar)','noSpread',function(on)
+	if AAD_REQFAIL then
+		-- executor tidak mendukung: tombol terkunci, hanya tampilkan panduan
+		S.noSpread=false NS.on=false -- config lama bisa membawa true; paksa OFF
+		log('No Spread terkunci: executor "'..AAD_EXEC..'" tidak mendukung require() modul game. Ganti executor lain (mis. Delta) untuk memakai fitur ini.')
+		showToast('🔒 No Spread tidak didukung executor ini',Color3.fromRGB(255,150,120))
+		return
+	end
 	if on then
 		local ok=hookNoSpread()
-		if ok then log('No Spread ON.') else log('No Spread gagal (hook).') end
+		if ok then log('No Spread ON.') else log('No Spread gagal (patch).') end
 	else
 		unhookNoSpread()
 		log('No Spread OFF.')
 	end
-end)
+end,function() return AAD_REQFAIL end)
 sect(pages['Tempur'],'TRIGGERBOT')
 tog(pages['Tempur'],'Tembak otomatis saat crosshair pas','trig')
 slide(pages['Tempur'],'Jeda tembak (ms)',50,400,120,function(v) S.trigDelay=v end)
@@ -659,7 +712,7 @@ local toastCache=nil
 local toast=mk('TextLabel',{Size=UDim2.new(0,270,0,38),Position=UDim2.new(0.5,-135,0,64),BackgroundColor3=Color3.fromRGB(12,13,20),BackgroundTransparency=0.15,Text='',Font=Enum.Font.GothamBold,TextSize=15,TextColor3=Color3.fromRGB(120,255,160),TextTruncate=Enum.TextTruncate.AtEnd,BorderSizePixel=0,Visible=false},gui)
 cr(toast,10)
 mk('UIStroke',{Color=Color3.fromRGB(70,110,180),Thickness=1.2},toast)
-local function showToast(t,col)
+showToast=function(t,col) -- isi local forward dari atas (dipakai alert tombol-terkunci)
 	if t~=toastCache then
 		toastCache=t
 		toast.Text=t
@@ -779,8 +832,17 @@ end)
 -- oleh Blaster:GetRayResults() memakai Blaster:GetSpread() — di situlah sebar
 -- peluru berasal (hip-fire besar, scope kecil). Jadi fix paling bersih:
 --   patch Blaster.GetSpread() agar selalu return 0 → hip-fire & scope lurus.
--- Butuh executor dengan require() (Xeno laptop: require diblokir → fallback
--- hook FireServer di bawah; di executor HP ini require jalan).
+-- CATATAN EXECUTOR (terverifikasi live 2026-10-03, laptop Xeno):
+--   - require() modul game di Xeno GAGAL ("Requested module experienced an error
+--     while loading") dan MELETAKKAN module ke cache gagal. Efek samping nyata:
+--     script equip game (装备加载, equipment loading) ikut gagal require → saat
+--     respawn senjata tidak dibuat ulang di client → tangan kosong + tombol 1/2/3
+--     mati (bug 2026-10-03). Jadi di Xeno: JANGAN PERNAH require modul game.
+--   - hookfunction pada RemoteEvent.FireServer (C-method) di Xeno juga tidak
+--     pernah terpanggil (hookOk=true tapi fired=false, NS.shots tetap 0) →
+--     jalur fallback di bawah tidak berguna, hanya berisiko.
+--   - Delta (HP): require() jalan → patch GetSpread aktif &equipment normal.
+--     Set NS_UNSUPPORTED via identifyexecutor di bawah.
 local NS=ENV.AAD_NS
 if type(NS)~='table' then
 	NS={on=false,hooked=false,patched=false,shots=0,dirs=0,logs={},inst=nil}
@@ -797,26 +859,10 @@ end
 -- ini hanya dipakai mengatur urutan: API game dulu, klik OS paling akhir.
 local TouchMode=false
 pcall(function() TouchMode=UIS.TouchEnabled==true end)
-local MainRemote=RS:FindFirstChild('RemoteEvent') and RS.RemoteEvent:FindFirstChild('Main')
-local function straighten(payload)
-	-- Fallback: rayDirections = vektor offset dunia (arah*range), bukan posisi.
-	-- Rapatkan: offset jadi look*range → semua ray lurus ke tengah kamera.
-	if type(payload)~='table' then return end
-	local params=payload[2]
-	if type(params)~='table' then return end
-	local dirs=params.rayDirections
-	if type(dirs)~='table' or #dirs<1 then return end
-	local cam=Workspace.CurrentCamera
-	if not cam then return end
-	local look=cam.CFrame.LookVector
-	for i=1,#dirs do
-		local d=dirs[i]
-		if typeof(d)=='Vector3' then
-			dirs[i]=look*d.Magnitude
-		end
-	end
-end
 local function patchBlaster()
+	-- Pernah gagal / Xeno → JANGAN coba lagi: percobaan require yang gagal
+	-- me-poison cache module (senjata hilang saat respawn, bug 2026-10-03).
+	if ENV.AAD_REQFAIL then return false end
 	-- require modul Blaster → wrap GetSpread: (a) capture instance senjata aktif
 	-- (self) untuk triggerbot & magnet, (b) return 0 saat NS.on untuk no-spread.
 	local ok,err=pcall(function()
@@ -846,7 +892,12 @@ local function patchBlaster()
 		NS.patched=true
 		NS.logs[#NS.logs+1]='patch GetSpread OK'
 	end)
-	if not ok and #NS.logs<8 then NS.logs[#NS.logs+1]='patch gagal: '..tostring(err) end
+	if not ok then
+		ENV.AAD_REQFAIL=true
+		AAD_REQFAIL=true -- local di atas (closure): sinkronkan agar UI ikut terkunci
+		for _,p in ipairs(togPainters['noSpread'] or {}) do pcall(p) end
+		if #NS.logs<8 then NS.logs[#NS.logs+1]='patch gagal: '..tostring(err) end
+	end
 	return ok
 end
 hookNoSpread=function()
@@ -855,38 +906,13 @@ hookNoSpread=function()
 	-- kalau karena suatu hal belum terpasang, pasang sekarang.
 	if NS.patched then return true end
 	if patchBlaster() then NS.hooked=true return true end
-	-- Fallback (executor tanpa require): hook FireServer.
-	if NS.hooked then return true end
-	if not MainRemote then return false end
-	local orig=MainRemote.FireServer
-	NS.orig=NS.orig or orig
-	local realOrig=NS.orig
-	local ok=pcall(function()
-		hookfunction(orig,newcclosure(function(self,...)
-			if NS.on then
-				local a=...
-				if type(a)=='table' then
-					pcall(function()
-						if type(a[2])=='table' and type(a[2].rayDirections)=='table' then
-							NS.shots=NS.shots+1
-							local rd=a[2].rayDirections
-							if #NS.logs<8 then
-								local okM,mag=pcall(function() return rd[1].Magnitude end)
-								NS.logs[#NS.logs+1]='#'..NS.shots..' proto='..tostring(a[1])
-									..' nDir='..#rd..' mag='..tostring(okM and mag)
-								NS.dirs=NS.dirs+#rd
-							end
-							straighten(a)
-						end
-					end)
-				end
-			end
-			return realOrig(self,...)
-		end))
-	end)
-	NS.hooked=ok
-	return ok
+	-- Executor tanpa require (Xeno): hookfunction pada RemoteEvent.FireServer
+	-- (C-method) di Xeno TIDAK PERNAH terpanggil (hookOk=true tapi fired=false,
+	-- NS.shots tetap 0 terverifikasi) → tidak ada no-spread di sini. Lebih baik
+	-- tidak berfungsi daripada merusak alur FireServer tembak/equip.
+	return false
 end
+-- [jalur hook FireServer dihapus 2026-10-03: tak berfungsi di Xeno + berisiko]
 unhookNoSpread=function()
 	NS.on=false
 	-- GetSpread wrapper sengaja TIDAK dilepas: triggerbot butuh NS.inst (capture
@@ -895,14 +921,25 @@ unhookNoSpread=function()
 end
 -- Wrapper dipasang SEKALI saat load (bukan hanya saat toggle ON) supaya
 -- NS.inst capture terus berjalan even ketika no-spread OFF.
+-- Dukungan require sudah diprobe di atas (AAD_REQFAIL): kalau false, JANGAN
+-- pernah require modul game (percobaan gagal meracuni cache → senjata hilang
+-- respawn 2026-10-03). patchBlaster menghormati gate itu.
+pcall(function()
+	if AAD_REQFAIL then
+		log('TIDAK DIDUKUNG: executor "'..AAD_EXEC..'" memblokir require() modul game → fitur No Spread terkunci. Fitur butuh module injection; tanpa itu tidak bisa jalan & berisiko merusak senjata saat respawn. Ganti executor lain (mis. Delta) untuk memakainya.')
+	else
+		log('No Spread: support ('..AAD_EXEC..', require OK).')
+	end
+end)
 do
-	local ok=pcall(patchBlaster)
-	if not ok then
-		-- executor tanpa require → pakai jalur hook FireServer classic
-		NS.on=false
+	if not AAD_REQFAIL then
+		local ok=pcall(patchBlaster)
+		if not ok then NS.on=false end
 	end
 end
 -- pulihkan keadaan sesuai state script sekarang
+-- terkunci → paksa OFF (config lama bisa bawa noSpread=true ke executor tanpa dukungan)
+if AAD_REQFAIL then S.noSpread=false end
 NS.on=S.noSpread and true or false
 
 -- REGISTER BONUS DRAWCALL =================
@@ -1038,7 +1075,7 @@ local function bestTarget()
 			if p and p:IsA('BasePart') then cands[#cands+1]=p end
 		end
 		if #cands==0 then return end
-		local inFov,chosen=false,nil
+		local inFov,det=false,nil
 		for _,ap in ipairs(cands) do
 			local sp,on=cam:WorldToViewportPoint(ap.Position)
 			if on then
@@ -1047,12 +1084,22 @@ local function bestTarget()
 				local px=math.sqrt(dx*dx+dy*dy)
 				if px<=S.aimFov then
 					inFov=true
-					if not S.aimVis or visibleRaw(cpos,ap,m) then chosen=ap break end
+					if not S.aimVis or visibleRaw(cpos,ap,m) then det=ap break end
 				end
 			end
 		end
 		if not inFov then nFov=nFov+1 return end
-		if not chosen then nBlk=nBlk+1 return end
+		if not det then nBlk=nBlk+1 return end
+		-- Deteksi pakai bagian mana pun (badan boleh di FOV), tapi titik bidik
+		-- dipaksa kepala saat Auto Headshot — bug lama: loop berurutan berhenti
+		-- di badan kalau kepala di luar lingkaran FOV / dianggap terhalang.
+		local hd=S.aimHead and m:FindFirstChild('Head') or nil
+		if hd and not hd:IsA('BasePart') then hd=nil end
+		local chosen=det
+		if hd then
+			local hs,hOn=cam:WorldToViewportPoint(hd.Position)
+			if hOn and (not S.aimVis or visibleRaw(cpos,hd,m)) then chosen=hd end
+		end
 		local sp=cam:WorldToViewportPoint(chosen.Position)
 		local vs=cam.ViewportSize
 		local dx,dy=sp.X-vs.X/2,sp.Y-vs.Y/2
@@ -1163,6 +1210,18 @@ end)
 -- fokus / HUD terbuka / di lobby (bug fatal: spam klik ke Chrome). Guard wajib.
 local trigBusy=false
 local winFocused=true
+-- Saat Auto Headshot ON: triggerbot hanya menembak bila bagian yang kena
+-- ray tepat kepala/topi. Tanpa ini, triggerbot menembak begitu crosshair
+-- menyapu badan (saat lerp menuju kepala) → kill didominasi hit badan.
+local function headHitOK(part,m)
+	if not part then return false end
+	local hd=m and m:FindFirstChild('Head')
+	if not hd then return false end
+	if part==hd or part:IsDescendantOf(hd) then return true end
+	local p=part.Parent
+	if p and p:IsA('Accessory') then return true end
+	return (part.Position-hd.Position).Magnitude<=1.2
+end
 pcall(function()
 	UIS.WindowFocused:Connect(function() winFocused=true end)
 	UIS.WindowFocusReleased:Connect(function() winFocused=false end)
@@ -1201,6 +1260,7 @@ task.spawn(function()
 								local res2=Workspace:Raycast(cam2.CFrame.Position,cam2.CFrame.LookVector*500,rparams)
 								local m2=res2 and res2.Instance and res2.Instance:FindFirstAncestorOfClass('Model')
 								fire=(m2==m)
+								if fire and S.aimHead then fire=headHitOK(res2.Instance,m) end
 							end
 						end
 					if fire then
