@@ -777,16 +777,20 @@ end)
 -- hook FireServer di bawah; di executor HP ini require jalan).
 local NS=ENV.AAD_NS
 if type(NS)~='table' then
-	NS={on=false,hooked=false,patched=false,shots=0,dirs=0,logs={}}
+	NS={on=false,hooked=false,patched=false,shots=0,dirs=0,logs={},inst=nil}
 	ENV.AAD_NS=NS
 else
 	-- File dijalankan ulang (eksekusi manual / queue pasca-teleport). Module
 	-- cache BISA baru (teleport) → wrapper lama tidak terpasang lagi, jadi
-	-- flag direset dan dipasang ulang oleh "if S.noSpread" di bawah.
+	-- flag direset dan dipasang ulang oleh blok di bawah.
 	-- origSpread/lastWrapped TIDAK direset (identitas wrapper dipakai patchBlaster
 	-- untuk membedakan cache baru vs wrapper lama yang masih terpasang).
-	NS.patched=false NS.hooked=false NS.blaster=nil
+	NS.patched=false NS.hooked=false NS.blaster=nil NS.inst=nil
 end
+-- TouchEnabled belum tentu berarti HP (Xeno PC dengan Precision?). Probabilitas
+-- ini hanya dipakai mengatur urutan: API game dulu, klik OS paling akhir.
+local TouchMode=false
+pcall(function() TouchMode=UIS.TouchEnabled==true end)
 local MainRemote=RS:FindFirstChild('RemoteEvent') and RS.RemoteEvent:FindFirstChild('Main')
 local function straighten(payload)
 	-- Fallback: rayDirections = vektor offset dunia (arah*range), bukan posisi.
@@ -807,7 +811,8 @@ local function straighten(payload)
 	end
 end
 local function patchBlaster()
-	-- require modul Blaster → patch GetSpread→0. Return true kalau berhasil.
+	-- require modul Blaster → wrap GetSpread: (a) capture instance senjata aktif
+	-- (self) untuk triggerbot & magnet, (b) return 0 saat NS.on untuk no-spread.
 	local ok,err=pcall(function()
 		local Blaster=require(RS.Scripts.Model.Blaster)
 		if type(Blaster)~='table' or type(Blaster.GetSpread)~='function' then error('GetSpread tak ada') end
@@ -820,6 +825,12 @@ local function patchBlaster()
 		end
 		local orig=NS.origSpread
 		local wrapped=function(self,...)
+			if type(self)=='table' and not NS.inst then
+				-- Blaster instance asli: punya propMap/GetRaysPerShot (dicek aman)
+				local isInst=false
+				pcall(function() isInst=(self.GetRaysPerShot~=nil or self.propMap~=nil) end)
+				if isInst then NS.inst=self end
+			end
 			if NS.on then return 0 end
 			return orig(self,...)
 		end
@@ -834,6 +845,8 @@ local function patchBlaster()
 end
 hookNoSpread=function()
 	NS.on=true
+	-- Wrapper dipasang permanen sejak load (capture instance untuk triggerbot);
+	-- kalau karena suatu hal belum terpasang, pasang sekarang.
 	if NS.patched then return true end
 	if patchBlaster() then NS.hooked=true return true end
 	-- Fallback (executor tanpa require): hook FireServer.
@@ -870,18 +883,21 @@ hookNoSpread=function()
 end
 unhookNoSpread=function()
 	NS.on=false
-	if NS.patched and NS.blaster and NS.origSpread then
-		pcall(function() NS.blaster.GetSpread=NS.origSpread end)
-		NS.patched=false
-		NS.hooked=false
-		return
+	-- GetSpread wrapper sengaja TIDAK dilepas: triggerbot butuh NS.inst (capture
+	-- dilakukan di wrapper itu). Menonaktifkan no-spread cukup NS.on=false, jadi
+	-- fungsi asli dipanggil dan spread normal kembali.
+end
+-- Wrapper dipasang SEKALI saat load (bukan hanya saat toggle ON) supaya
+-- NS.inst capture terus berjalan even ketika no-spread OFF.
+do
+	local ok=pcall(patchBlaster)
+	if not ok then
+		-- executor tanpa require → pakai jalur hook FireServer classic
+		NS.on=false
 	end
-	if not NS.hooked or not NS.orig then return end
-	pcall(function() hookfunction(MainRemote.FireServer,NS.orig) end)
-	NS.hooked=false
 end
 -- pulihkan keadaan sesuai state script sekarang
-if S.noSpread then pcall(hookNoSpread) else NS.on=false end
+NS.on=S.noSpread and true or false
 
 -- REGISTER BONUS DRAWCALL =================
 local fovCircle=nil
@@ -1181,12 +1197,29 @@ task.spawn(function()
 								fire=(m2==m)
 							end
 						end
-						if fire then
+					if fire then
+						-- 1) Jalur API game (aman di HP: TIDAK injeksi klik OS,
+						--    jadi input sentuh tidak rusak/terkunci). Instansi
+						--    ditangkap oleh wrapper GetSpread (patchBlaster).
+						local used=false
+						if type(NS)=='table' and type(NS.inst)=='table' then
+							-- SemiFire menangani ammo + tempo tembak seperti input asli;
+							-- CanShoot menolak saat reload/cooldown/lobby.
+							local can=false
+							pcall(function() can=(NS.inst:CanShoot(false)==true) end)
+							if can then
+								used=pcall(function() NS.inst:SemiFire() end)
+							end
+						end
+						-- 2) Fallback klik OS HANYA di non-touch (desktop). Di HP
+						--    (touch) itulah sumber bug "layar tidak bisa dimainkan".
+						if not used and not TouchMode then
 							if mouse1click then pcall(mouse1click)
 							elseif mouse1press and mouse1release then
 								pcall(function() mouse1press() task.wait(0.05) mouse1release() end)
 							end
 						end
+					end
 						task.wait(0.15)
 						trigBusy=false
 					end
