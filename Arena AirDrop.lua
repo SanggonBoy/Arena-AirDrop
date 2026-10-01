@@ -51,7 +51,6 @@ local S={
 	noSpread=false,
 	trig=false, trigDelay=120,
 	espM=false, espB=false,
-	magnetOrb=false, magnetRange=60,
 	cfgAuto=false, -- auto-load konfigurasi tersimpan saat script jalan/teleport
 	-- server hop + pilih platform (HP = place mobile, PC = place laptop)
 	srvPlatHP=false, srvPlatPC=false, srvPlatAuto=true,
@@ -368,11 +367,6 @@ end)
 sect(pages['Lihat'],'ESP')
 tog(pages['Lihat'],'ESP Pemain','espP')
 tog(pages['Lihat'],'ESP Airdrop / Hadiah','espC')
-sect(pages['Lihat'],'MAGNET ORB DARAH (+25)')
-tog(pages['Lihat'],'Magnet Orb (tarik orb ke kamu)','magnetOrb',function(on)
-	if on then log('Magnet Orb ON.') else log('Magnet Orb OFF.') end
-end)
-slide(pages['Lihat'],'Jangkauan magnet (stud)',10,300,60,function(v) S.magnetRange=v end,'magnetRange')
 sect(pages['Lihat'],'LAYAR')
 tog(pages['Lihat'],'Fullbright','fb',function(on)
 	if not on then
@@ -498,7 +492,6 @@ end
 
 function resetAll()
 	S.espP=false S.espC=false S.fb=false
-	S.magnetOrb=false
 	S.fly=false S.nc=false S.ij=false S.afk=false
 	S.aim=false S.trig=false S.espM=false S.espB=false S.fovShow=false
 	S.bigHead=false S.headSize=3
@@ -656,74 +649,6 @@ task.spawn(function()
 			Lighting.FogEnd=100000 Lighting.GlobalShadows=false
 		end
 		task.wait(1)
-	end
-end)
-
--- ================= MAGNET ORB DARAH (+25) =================
--- Game ini: orb darah muncul dari jasad, server yang menariknya smooth fly ke
--- pemain terdekat lalu memberi +25 HP. Tidak ada remote client untuk klaim orb
--- → strategi: geser RootPart model "BoostHealth" ke karakter kita. Karakter
--- TIDAK digerakkan sama sekali → ritme aim/tembak aman.
--- Diagnosa: getgenv().AAD_MAG = {orbs, try, moved, claimed, owner, last}.
-ENV.AAD_MAG=ENV.AAD_MAG or {orbs=0,try=0,moved=0,claimed=0,owner='?',last='',hp=0}
-local MAG=ENV.AAD_MAG
-local function orbModelOf(v)
-	if not v:IsA('Model') or v.Name~='BoostHealth' then return nil end
-	local cf=Workspace:FindFirstChild('Cache')
-	if cf and v:IsDescendantOf(cf) then return nil end -- template, bukan orb hidup
-	return v
-end
-local lastHP=nil
-task.spawn(function()
-	while alive() do
-		pcall(function()
-			local c=lp.Character
-			local hrp=c and c:FindFirstChild('HumanoidRootPart')
-			local hum=c and c:FindFirstChildOfClass('Humanoid')
-			if not (hrp and hum and hum.Health>0) then lastHP=nil return end
-			local hp=hum.Health
-			-- hitung klaim: HP naik saat magnet ON
-			if S.magnetOrb and lastHP and hp>lastHP+0.5 then
-				MAG.claimed=MAG.claimed+1
-			end
-			lastHP=hp
-			MAG.hp=math.floor(hp)
-			if not S.magnetOrb then return end
-			local me=hrp.Position
-			local range=S.magnetRange or 60
-			local nOrb,best,bestD=0,nil,nil
-			for _,v in ipairs(Workspace:GetDescendants()) do
-				local mdl=orbModelOf(v)
-				if mdl then
-					local root=mdl:FindFirstChild('RootPart') or mdl.PrimaryPart
-						or mdl:FindFirstChildWhichIsA('BasePart',true)
-					if root then
-						nOrb=nOrb+1
-						local d=(root.Position-me).Magnitude
-						if d<=range and (not bestD or d<bestD) then
-							bestD=d best=root
-						end
-					end
-				end
-			end
-			MAG.orbs=nOrb
-			if best then
-				MAG.try=MAG.try+1
-				MAG.last=string.format('%.0fm',bestD)
-				pcall(function()
-					if not best.Anchored then best.CanCollide=false best.Massless=true end
-					local ok,o=pcall(function() return best:GetNetworkOwner() end)
-					if ok then MAG.owner=(type(o)=='userdata' and 'server') or tostring(o) end
-				end)
-				-- ler pingkahal: fly halus ke posisi karakter (dua tick ~0.3s)
-				local goal=me+Vector3.new(0,1.5,0)
-				pcall(function()
-					best.CFrame=best.CFrame:Lerp(CFrame.new(goal),0.45)
-				end)
-				MAG.moved=MAG.moved+1
-			end
-		end)
-		task.wait(0.15)
 	end
 end)
 
@@ -885,7 +810,7 @@ local function patchBlaster()
 	-- me-poison cache module (senjata hilang saat respawn, bug 2026-10-03).
 	if ENV.AAD_REQFAIL then return false end
 	-- require modul Blaster → wrap GetSpread: (a) capture instance senjata aktif
-	-- (self) untuk triggerbot & magnet, (b) return 0 saat NS.on untuk no-spread.
+	-- (self) untuk triggerbot, (b) return 0 saat NS.on untuk no-spread.
 	local ok,err=pcall(function()
 		local Blaster=require(RS.Scripts.Model.Blaster)
 		if type(Blaster)~='table' or type(Blaster.GetSpread)~='function' then error('GetSpread tak ada') end
